@@ -1,0 +1,112 @@
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, BatchNormalization, ReLU, MaxPooling2D, Flatten, Dense, Softmax
+from tensorflow.keras.optimizers import Adam
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from skopt import BayesSearchCV
+from skopt.space import Integer, Categorical, Real
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score, accuracy_score, cohen_kappa_score
+
+# Data Preparation
+data = pd.read_excel('TRAIN.xlsx').values
+Input = data[:, 1:13]  # Feature attributes
+Output = data[:, 0]  # Type (2 categories)
+
+# Split into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(Input, Output, test_size=0.3, random_state=42)
+
+# Normalize the data
+scaler = MinMaxScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# Reshape the data for CNN input (12 features -> 12x1x1)
+X_train = X_train.reshape(-1, 12, 1, 1)
+X_test = X_test.reshape(-1, 12, 1, 1)
+
+# Define the CNN model construction
+def create_model(convLayer, kernelSize, learningRate, batchSize):
+    model = Sequential()
+
+    model.add(Conv2D(convLayer, (kernelSize, 1), input_shape=(12, 1, 1)))
+    model.add(BatchNormalization())
+    model.add(ReLU())
+    model.add(MaxPooling2D(pool_size=(2, 1), strides=1))
+    model.add(Conv2D(convLayer * 2, (kernelSize, 1)))
+    model.add(BatchNormalization())
+    model.add(ReLU())
+    model.add(Flatten())
+    model.add(Dense(2, activation='softmax'))
+
+    optimizer = Adam(learning_rate=learningRate)
+    model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    
+    return model
+
+# Define Bayesian optimization space for hyperparameters
+param_space = {
+    'convLayer': Integer(16, 64),
+    'kernelSize': Integer(2, 5),
+    'learningRate': Real(1e-4, 1e-2, prior='log-uniform'),
+    'batchSize': Integer(64, 256)
+}
+
+# Bayesian optimization function
+def bayesian_optimization(param_space, X_train, y_train):
+    def objective(params):
+        convLayer = params['convLayer']
+        kernelSize = params['kernelSize']
+        learningRate = params['learningRate']
+        batchSize = params['batchSize']
+        
+        # Create the CNN model
+        model = create_model(convLayer, kernelSize, learningRate, batchSize)
+
+        # Train the model
+        model.fit(X_train, y_train, epochs=50, batch_size=batchSize, verbose=0)
+
+        # Evaluate the model
+        y_pred = model.predict(X_test)
+        auc = roc_auc_score(y_test, y_pred[:, 1])
+
+        # Return the negative AUC for minimization (Bayesian optimization minimizes)
+        return -auc
+
+    # Run Bayesian optimization
+    opt = BayesSearchCV(create_model, param_space, n_iter=20, random_state=42, cv=3, scoring='neg_mean_squared_error')
+    opt.fit(X_train, y_train)
+    
+    # Return best parameters and AUC score
+    return opt.best_params_, opt.best_score_
+
+# Run Bayesian optimization
+best_params, best_score = bayesian_optimization(param_space, X_train, y_train)
+
+# Output best hyperparameters and AUC
+print("Best Hyperparameters from Bayesian Optimization:")
+print(best_params)
+print(f"Best AUC from Bayesian Optimization: {-best_score}")
+
+# Train final model with best hyperparameters
+final_model = create_model(best_params['convLayer'], best_params['kernelSize'], best_params['learningRate'], best_params['batchSize'])
+final_model.fit(X_train, y_train, epochs=50, batch_size=best_params['batchSize'], verbose=1)
+
+# Predict on the test set
+y_pred = final_model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+
+# Calculate evaluation metrics
+precision = precision_score(y_test, y_pred_classes)
+recall = recall_score(y_test, y_pred_classes)
+f1 = f1_score(y_test, y_pred_classes)
+accuracy = accuracy_score(y_test, y_pred_classes)
+kappa = cohen_kappa_score(y_test, y_pred_classes)
+
+# Print the metrics
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1-Score: {f1:.4f}")
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Cohen's Kappa: {kappa:.4f}")
